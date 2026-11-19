@@ -1,0 +1,223 @@
+# Public repo on purpose: public repositories get free macOS runners. Therefore this file holds NO project details.
+# Everything identifying lives in repository secrets (masked in logs):
+#   EXPO_TOKEN, EAS_STUB_APP_JSON, SRC_REPO_SSH, SRC_DEPLOY_KEY, SHOT_EMAIL, SHOT_PASSWORD, ART_KEY
+# The flows are fetched at run time from the private source repo (read-only deploy key), so they are never published.
+# Logs and artifacts here are world-readable, so:
+#   * the Maestro console output, its debug files and the device log are written to files and uploaded ENCRYPTED
+#     (decrypt locally with the key kept outside this repo);
+#   * only the captured screenshots are uploaded in the clear.
+name: capture
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_id:
+        description: 'EAS build id'
+        required: true
+        type: string
+      flow:
+        description: 'Flow path in the source repo'
+        required: false
+        default: '.maestro/store/run.yaml'
+        type: string
+      ref:
+        description: 'Source branch or tag'
+        required: false
+        default: 'main'
+        type: string
+      locale:
+        description: 'Language'
+        required: false
+        default: 'en'
+        type: string
+      appearance:
+        description: 'light or dark'
+        required: false
+        default: 'light'
+        type: choice
+        options: [light, dark]
+      device:
+        description: 'Simulator device type'
+        required: false
+        default: 'iPhone 16 Pro Max'
+        type: string
+
+permissions: {}
+
+jobs:
+  capture:
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+      BUILD_ID: ${{ inputs.build_id }}
+      FLOW: ${{ inputs.flow }}
+      SRC_REF: ${{ inputs.ref }}
+      DEVICE_NAME: ${{ inputs.device }}
+      LOCALE: ${{ inputs.locale }}
+      APPEARANCE: ${{ inputs.appearance }}
+      SHOT_EMAIL: ${{ secrets.SHOT_EMAIL }}
+      SHOT_PASSWORD: ${{ secrets.SHOT_PASSWORD }}
+      SRC_REPO_SSH: ${{ secrets.SRC_REPO_SSH }}
+      SRC_DEPLOY_KEY: ${{ secrets.SRC_DEPLOY_KEY }}
+      EAS_STUB_APP_JSON: ${{ secrets.EAS_STUB_APP_JSON }}
+      ART_KEY: ${{ secrets.ART_KEY }}
+      MAESTRO_DRIVER_STARTUP_TIMEOUT: '180000'
+      OUT_DIR: ${{ github.workspace }}/maestro-out
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Fetch the flows (private source, read-only)
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$SRC_DEPLOY_KEY" > "$HOME/.ssh/src_key"
+          chmod 600 "$HOME/.ssh/src_key"
+          ssh-keyscan -t ed25519,rsa github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/src_key -o IdentitiesOnly=yes"
+          git clone -q --depth 1 --branch "$SRC_REF" --filter=blob:none --sparse "$SRC_REPO_SSH" src >/dev/null 2>&1 \
+            || { echo "Could not fetch the flows"; exit 1; }
+          (cd src && git sparse-checkout set .maestro >/dev/null 2>&1)
+          rm -f "$HOME/.ssh/src_key"
+          test -f "src/$FLOW" || { echo "Flow file not found"; exit 1; }
+
+      - name: Fetch the EAS simulator build
+        run: |
+          set -euo pipefail
+          mkdir -p stub build/app
+          printf '%s' "$EAS_STUB_APP_JSON" > stub/app.json
+          echo '{"name":"stub","version":"1.0.0"}' > stub/package.json
+          (cd stub && npx --yes eas-cli build:view "$BUILD_ID" --json --non-interactive) > view.json 2>/dev/null \
+            || { echo "eas build:view failed"; exit 1; }
+          python3 - <<'PY'
+          import json,sys
+          raw=open('view.json').read()
+          d=json.loads(raw[raw.index('{'):raw.rindex('}')+1])
+          if d.get('status')!='FINISHED' or d.get('platform')!='IOS':
+              sys.exit("Build is not a finished iOS build")
+          url=(d.get('artifacts') or {}).get('buildUrl')
+          if not url: sys.exit('Build has no downloadable artifact')
+          open('url.txt','w').write(url)
+          PY
+          url=$(cat url.txt)
+          echo "::add-mask::$url"
+          curl -fsSL --retry 3 "$url" -o build/artifact
+          case "${url%%\?*}" in
+            *.zip) unzip -q build/artifact -d build/app ;;
+            *) tar -xzf build/artifact -C build/app ;;
+          esac
+          rm -f view.json url.txt
+          app=$(find build/app -maxdepth 3 -name '*.app' -type d | head -1)
+          test -n "$app"
+          bundle=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$app/Info.plist")
+          echo "::add-mask::$bundle"
+          echo "APP_PATH=$(cd "$(dirname "$app")" && pwd)/$(basename "$app")" >> "$GITHUB_ENV"
+          echo "APP_ID=$bundle" >> "$GITHUB_ENV"
+
+      - name: Boot the simulator
+        run: |
+          set -euo pipefail
+          runtime=$(xcrun simctl list runtimes -j | python3 -c "
+          import json,sys
+          r=[x for x in json.load(sys.stdin)['runtimes'] if x['isAvailable'] and x['platform']=='iOS']
+          r.sort(key=lambda x:[int(p) for p in x['version'].split('.')])
+          print(r[-1]['identifier'])")
+          devicetype=$(xcrun simctl list devicetypes -j | python3 -c "
+          import json,sys,os
+          want=os.environ['DEVICE_NAME']
+          d=[x for x in json.load(sys.stdin)['devicetypes'] if x['name']==want]
+          print(d[0]['identifier'] if d else '')")
+          test -n "$devicetype" || { echo "No device type named '$DEVICE_NAME'"; exit 1; }
+          udid=$(xcrun simctl create captures "$devicetype" "$runtime")
+          echo "UDID=$udid" >> "$GITHUB_ENV"
+          xcrun simctl boot "$udid"
+          xcrun simctl bootstatus "$udid" -b
+          xcrun simctl status_bar "$udid" override --time "9:41" --batteryState charged --batteryLevel 100 --cellularMode active --cellularBars 4 --wifiBars 3 || true
+
+      - name: Set appearance and language
+        run: |
+          set -euo pipefail
+          xcrun simctl ui "$UDID" appearance "$APPEARANCE"
+          if [ "$LOCALE" != "en" ]; then
+            xcrun simctl spawn "$UDID" defaults write -g AppleLanguages -array "$LOCALE"
+            xcrun simctl spawn "$UDID" defaults write -g AppleLocale -string "$LOCALE"
+          fi
+
+      - name: Install the app
+        run: xcrun simctl install "$UDID" "$APP_PATH"
+
+      - name: Install Maestro
+        run: |
+          curl -fsSL "https://get.maestro.mobile.dev" | bash >/dev/null 2>&1
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+
+      # Console output goes to a file (it names every step of the flow); it is uploaded encrypted below.
+      - name: Run the flow
+        run: |
+          mkdir -p "$OUT_DIR"
+          maestro --device "$UDID" test \
+            -e APP_ID="$APP_ID" -e SHOT_EMAIL="$SHOT_EMAIL" -e SHOT_PASSWORD="$SHOT_PASSWORD" \
+            --format junit --output "$OUT_DIR/report.xml" \
+            --test-output-dir "$OUT_DIR" \
+            "src/$FLOW" > "$OUT_DIR/maestro-console.txt" 2>&1 \
+            || { echo "The flow failed. Details are in the encrypted debug artifact."; exit 1; }
+
+      - name: Collect raw captures
+        if: always() && contains(inputs.flow, '.maestro/store')
+        run: |
+          set -euo pipefail
+          dest="screenshots-raw/$LOCALE/ios"
+          if [ "$APPEARANCE" = "dark" ]; then dest="$dest/dark"; fi
+          mkdir -p "$dest"
+          : > missing-captures.txt
+          for slug in quiz-result mood-checkin today support-hub journal sky-sphere mood-chart your-peace constellation-found day-complete; do
+            f=$(find "$OUT_DIR" . -maxdepth 8 -name "$slug.png" -not -path './node_modules/*' -not -path './screenshots-raw/*' 2>/dev/null | head -1)
+            if [ -n "$f" ]; then
+              case "$slug" in
+                mood-checkin) name=mood-check-in ;;
+                day-complete) name=closing ;;
+                *) name="$slug" ;;
+              esac
+              cp "$f" "$dest/$name.png"
+            else
+              echo "$slug" >> missing-captures.txt
+            fi
+          done
+          ls "$dest" | wc -l
+
+      - uses: actions/upload-artifact@v5
+        if: always() && contains(inputs.flow, '.maestro/store')
+        with:
+          name: store-screenshots-raw-${{ inputs.locale }}-${{ inputs.appearance }}
+          path: screenshots-raw
+          if-no-files-found: warn
+
+      - name: Encrypt the debug bundle
+        if: always()
+        run: |
+          mkdir -p "$OUT_DIR"
+          xcrun simctl io "$UDID" screenshot "$OUT_DIR/final-state.png" >/dev/null 2>&1 || true
+          xcrun simctl spawn "$UDID" log show --last 5m --predicate 'eventMessage CONTAINS "crash"' --style compact > "$OUT_DIR/app.log" 2>&1 || true
+          tar -czf - maestro-out | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:ART_KEY -out debug.tgz.enc
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: debug-encrypted
+          path: debug.tgz.enc
+          if-no-files-found: warn
+
+      - name: Fail if a capture is missing
+        if: always() && contains(inputs.flow, '.maestro/store')
+        run: |
+          if [ -s missing-captures.txt ]; then
+            echo "::error::Missing captures: $(paste -sd" " missing-captures.txt)"
+            exit 1
+          fi
