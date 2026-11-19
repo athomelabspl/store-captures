@@ -1,7 +1,7 @@
 # Public repo on purpose: public repositories get free macOS runners. Therefore this file holds NO project details.
 # Everything identifying lives in repository secrets (masked in logs):
-#   EXPO_TOKEN, EAS_STUB_APP_JSON, SRC_REPO_SSH, SRC_DEPLOY_KEY, SHOT_EMAIL, SHOT_PASSWORD, ART_KEY
-# The flows are fetched at run time from the private source repo (read-only deploy key), so they are never published.
+#   EXPO_TOKEN, EAS_STUB_APP_JSON, FLOWS_B64, SHOT_EMAIL, SHOT_PASSWORD, ART_KEY
+# The flows are a base64 tarball in the FLOWS_B64 secret (never committed here), so they are never published.
 # Logs and artifacts here are world-readable, so:
 #   * the Maestro console output, its debug files and the device log are written to files and uploaded ENCRYPTED
 #     (decrypt locally with the key kept outside this repo);
@@ -19,11 +19,6 @@ on:
         description: 'Flow path in the source repo'
         required: false
         default: '.maestro/store/run.yaml'
-        type: string
-      ref:
-        description: 'Source branch or tag'
-        required: false
-        default: 'main'
         type: string
       locale:
         description: 'Language'
@@ -52,14 +47,12 @@ jobs:
       EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
       BUILD_ID: ${{ inputs.build_id }}
       FLOW: ${{ inputs.flow }}
-      SRC_REF: ${{ inputs.ref }}
       DEVICE_NAME: ${{ inputs.device }}
       LOCALE: ${{ inputs.locale }}
       APPEARANCE: ${{ inputs.appearance }}
       SHOT_EMAIL: ${{ secrets.SHOT_EMAIL }}
       SHOT_PASSWORD: ${{ secrets.SHOT_PASSWORD }}
-      SRC_REPO_SSH: ${{ secrets.SRC_REPO_SSH }}
-      SRC_DEPLOY_KEY: ${{ secrets.SRC_DEPLOY_KEY }}
+      FLOWS_B64: ${{ secrets.FLOWS_B64 }}
       EAS_STUB_APP_JSON: ${{ secrets.EAS_STUB_APP_JSON }}
       ART_KEY: ${{ secrets.ART_KEY }}
       MAESTRO_DRIVER_STARTUP_TIMEOUT: '180000'
@@ -74,18 +67,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Fetch the flows (private source, read-only)
+      - name: Unpack the flows
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/.ssh"
-          printf '%s\n' "$SRC_DEPLOY_KEY" > "$HOME/.ssh/src_key"
-          chmod 600 "$HOME/.ssh/src_key"
-          ssh-keyscan -t ed25519,rsa github.com >> "$HOME/.ssh/known_hosts" 2>/dev/null
-          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/src_key -o IdentitiesOnly=yes"
-          git clone -q --depth 1 --branch "$SRC_REF" --filter=blob:none --sparse "$SRC_REPO_SSH" src >/dev/null 2>&1 \
-            || { echo "Could not fetch the flows"; exit 1; }
-          (cd src && git sparse-checkout set .maestro >/dev/null 2>&1)
-          rm -f "$HOME/.ssh/src_key"
+          mkdir -p src
+          printf '%s' "$FLOWS_B64" | base64 -d | tar -xzf - -C src
           test -f "src/$FLOW" || { echo "Flow file not found"; exit 1; }
 
       - name: Fetch the EAS simulator build
