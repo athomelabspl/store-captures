@@ -104,7 +104,8 @@ jobs:
           test -n "$app"
           bundle=$(/usr/libexec/PlistBuddy -c "Print CFBundleIdentifier" "$app/Info.plist")
           echo "::add-mask::$bundle"
-          echo "APP_PATH=$(cd "$(dirname "$app")" && pwd)/$(basename "$app")" >> "$GITHUB_ENV"
+          mv "$app" build/target.app
+          echo "APP_PATH=$PWD/build/target.app" >> "$GITHUB_ENV"
           echo "APP_ID=$bundle" >> "$GITHUB_ENV"
 
       - name: Boot the simulator
