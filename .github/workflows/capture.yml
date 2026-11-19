@@ -80,7 +80,7 @@ jobs:
           mkdir -p stub build/app "$OUT_DIR"
           printf '%s' "$EAS_STUB_APP_JSON" > stub/app.json
           echo '{"name":"stub","version":"1.0.0"}' > stub/package.json
-          (cd stub && npx --yes eas-cli build:view "$BUILD_ID" --json --non-interactive) > view.json 2> "$OUT_DIR/eas-stderr.txt" \
+          (cd stub && npx --yes eas-cli build:view "$BUILD_ID" --json) > view.json 2> "$OUT_DIR/eas-stderr.txt" \
             || { echo "eas build:view failed (details in the encrypted debug artifact)"; exit 1; }
           python3 - <<'PY'
           import json,sys
