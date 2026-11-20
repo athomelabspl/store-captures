@@ -100,6 +100,15 @@ jobs:
           curl -fsSL "https://get.maestro.mobile.dev" | bash >/dev/null 2>&1
           echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
 
+      # The system language must be set when the emulator boots (the per-app locale command did not change the app's
+      # language). Tags: en-US, es-ES, fr-FR, de-DE, pt-BR, pl-PL.
+      - name: Pick the system locale
+        run: |
+          case "$LOCALE" in
+            es) tag=es-ES ;; fr) tag=fr-FR ;; de) tag=de-DE ;; pt) tag=pt-BR ;; pl) tag=pl-PL ;; *) tag=en-US ;;
+          esac
+          echo "LOCALE_TAG=$tag" >> "$GITHUB_ENV"
+
       - name: Enable KVM
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -116,8 +125,8 @@ jobs:
           adb install -r "$APK_PATH" >/dev/null
           # Appearance: the app pins its theme to the system setting.
           if [ "$APPEARANCE" = "dark" ]; then adb shell cmd uimode night yes; else adb shell cmd uimode night no; fi
-          # Language: per-app locale (Android 13+). English needs no change.
-          if [ "$LOCALE" != "en" ]; then adb shell cmd locale set-app-locales "$APP_ID" --locales "$LOCALE" || true; fi
+          # Language: set at emulator boot (see the workflow). Log what the device ended up with.
+          echo "system locale: $(adb shell getprop persist.sys.locale) / $(adb shell getprop ro.product.locale)" > "$OUT_DIR/locale.txt" 2>&1 || true
           # No notification permission prompt.
           adb shell pm grant "$APP_ID" android.permission.POST_NOTIFICATIONS || true
           # Clean status bar: 9:41, full battery and signal, no notification icons.
@@ -149,7 +158,7 @@ jobs:
           # Nexus 5X is 1080 x 1920, the Google Play screenshot canvas.
           profile: Nexus 5X
           disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -prop persist.sys.locale=${{ env.LOCALE_TAG }}
           script: bash ./run-on-emulator.sh
 
       - name: Collect raw captures
