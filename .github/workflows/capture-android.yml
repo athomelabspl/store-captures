@@ -135,7 +135,7 @@ jobs:
             "src/$FLOW" > "$OUT_DIR/maestro-console.txt" 2>&1
           code=$?
           adb exec-out screencap -p > "$OUT_DIR/final-state.png" || true
-          adb logcat -d -t 500 > "$OUT_DIR/logcat.txt" 2>&1 || true
+          adb logcat -d > "$OUT_DIR/logcat.txt" 2>&1 || true
           exit $code
           SH
           chmod +x run-on-emulator.sh
