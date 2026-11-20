@@ -122,6 +122,19 @@ jobs:
           #!/usr/bin/env bash
           set -uo pipefail
           adb wait-for-device
+          # System language: the image is rootable, so set the locale property and restart the framework (an emulator
+          # boot option and the per-app locale command both did not change the app's language).
+          if [ "$LOCALE" != "en" ]; then
+            adb root >/dev/null 2>&1 || true
+            sleep 3; adb wait-for-device
+            adb shell setprop persist.sys.locale "$LOCALE_TAG"
+            adb shell stop; sleep 2; adb shell start
+            for i in $(seq 1 60); do
+              [ "$(adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ] && break
+              sleep 3
+            done
+            sleep 15
+          fi
           adb install -r "$APK_PATH" >/dev/null
           # Appearance: the app pins its theme to the system setting.
           if [ "$APPEARANCE" = "dark" ]; then adb shell cmd uimode night yes; else adb shell cmd uimode night no; fi
@@ -158,7 +171,7 @@ jobs:
           # Nexus 5X is 1080 x 1920, the Google Play screenshot canvas.
           profile: Nexus 5X
           disable-animations: true
-          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -prop persist.sys.locale=${{ env.LOCALE_TAG }}
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
           script: bash ./run-on-emulator.sh
 
       - name: Collect raw captures
